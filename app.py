@@ -1,23 +1,39 @@
 from PyQt6.QtCore import QThreadPool, QTimer
-from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction, QIcon
 from ollama import chat
 from worker import Worker
 
 class ModelInterface:
     def __init__(self):
+        self.messages = []
         self.model = 'llama3.2'
 
     def query(self, input: str) -> str:
-        print(input)
+        self.messages.append({'role': 'user', 'content': input})
         response = chat(
             model=self.model, 
             messages=[{'role': 'user', 'content': input}], 
         )
-        return response['message']['content']
+        self.messages.append({'role': 'assistant', 'content': response.message.content})
+        return response.message.content
 
 class MainWindow(QMainWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # self.setWindowFlags(Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon("assets/icon.png"))
+        tray_menu = QMenu()
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(QApplication.instance().quit)
+        tray_menu.addAction(exit_action)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+
         self.counter = 0
         self.model = ModelInterface()
 
@@ -28,7 +44,6 @@ class MainWindow(QMainWindow):
         button = QPushButton("Send")
         button.pressed.connect(self.send_message)
         self.label_response = QLabel("Waiting for input...")
-
 
         layout.addWidget(self.progress)
         layout.addWidget(self.input)
