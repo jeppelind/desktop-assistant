@@ -1,6 +1,5 @@
-import subprocess
 import tempfile
-from PyQt6.QtCore import QThreadPool, QTimer
+from PyQt6.QtCore import QThreadPool, QTimer, QThread
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
@@ -9,40 +8,36 @@ from worker import Worker
 from piper import PiperVoice
 import wave
 import os
-import soundfile
-import sounddevice
+import time
+import soundfile as sf
+import sounddevice as sd
+
 
 class TTS:
     def __init__(self):
         self.voice = PiperVoice.load("assets/voice/en_US-hfc_female-medium.onnx", "assets/voice/en_US-hfc_female-medium.onnx.json")
-        self.audio_file_path = None
-        self.process = None
     
     def speak(self, text: str):
         with tempfile.NamedTemporaryFile(dir="tmp", suffix=".wav", delete=False) as temp_audio:
-            self.audio_file_path = temp_audio.name
+            audio_file_path = temp_audio.name
         
         try:
-            with wave.open(self.audio_file_path, "wb") as wav_file:
+            with wave.open(audio_file_path, "wb") as wav_file:
                 self.voice.synthesize_wav(text, wav_file)
 
-            self.process = subprocess.Popen(["aplay", "-q", self.audio_file_path])
-            self.process.wait()
+            data, fs = sf.read(audio_file_path)
+            sd.play(data, fs)
+            
+            while sd.get_stream() is not None and sd.get_stream().active:
+                time.sleep(0.1)
         finally:
-            self.remove_audio_file()
-
-    def stop(self):
-        if self.process is not None:
-            self.process.terminate()
-    
-    def remove_audio_file(self):
-        print('remove_audio_file')
-        if self.audio_file_path and os.path.exists(self.audio_file_path):
             try:
-                os.remove(self.audio_file_path)
+                os.remove(audio_file_path)
             except OSError:
                 pass
-            self.audio_file_path = None
+
+    def stop(self):
+        sd.stop()
 
 # def speak_text(text: str):
 #     model_path = "assets/voice/en_US-hfc_female-medium.onnx"
@@ -127,6 +122,7 @@ class MainWindow(QMainWindow):
     def cleanup(self):
         print('cleanup')
         self.tts.stop()
+        self.threadpool.waitForDone()
 
     def recurring_timer(self):
         self.counter += 1
