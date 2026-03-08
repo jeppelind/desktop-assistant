@@ -11,7 +11,25 @@ import os
 import time
 import soundfile as sf
 import sounddevice as sd
+from faster_whisper import WhisperModel
 
+class STT:
+    def __init__(self, model_size="base"):
+        """
+        Args:
+            model_size (str): faster-whisper model.
+        """
+        print(f"Loading faster-whisper model: {model_size}")
+        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        print("Model loaded")
+    
+    def transcribe(self, audio_file_path: str) -> str:
+        if not audio_file_path:
+            return ""
+        
+        segments, info = self.model.transcribe(audio_file_path, language="en")
+        full_text = [segment.text for segment in segments]
+        return "".join(full_text).strip()
 
 class TTS:
     def __init__(self):
@@ -38,24 +56,6 @@ class TTS:
 
     def stop(self):
         sd.stop()
-
-# def speak_text(text: str):
-#     model_path = "assets/voice/en_US-hfc_female-medium.onnx"
-#     config_path = "assets/voice/en_US-hfc_female-medium.onnx.json"
-
-#     voice = PiperVoice.load(model_path, config_path)
-
-#     with tempfile.NamedTemporaryFile(dir="tmp", suffix=".wav", delete=False) as temp_audio:
-#         audio_path = temp_audio.name
-    
-#     with wave.open(audio_path, "wb") as wav_file:
-#         voice.synthesize_wav(text, wav_file)
-
-#     data, fs = soundfile.read(audio_path)
-#     sounddevice.play(data, fs)
-#     sounddevice.wait()
-    
-#     os.remove(audio_path)
 
 class ModelInterface:
     def __init__(self):
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self.counter = 0
         self.model = ModelInterface()
         self.tts = TTS()
+        self.stt = None
 
         layout = QVBoxLayout()
 
@@ -98,12 +99,15 @@ class MainWindow(QMainWindow):
         button.pressed.connect(self.send_message)
         button2 = QPushButton("Speak")
         button2.pressed.connect(self.speak_response)
+        button3 = QPushButton("Record")
+        button3.pressed.connect(self.record)
         self.label_response = QLabel("Waiting for input...")
 
         layout.addWidget(self.progress)
         layout.addWidget(self.input)
         layout.addWidget(button)
         layout.addWidget(button2)
+        layout.addWidget(button3)
         layout.addWidget(self.label_response)
 
         w = QWidget()
@@ -116,8 +120,15 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.recurring_timer)
         self.timer.start()
+        
+        self.init_stt()
 
         QApplication.instance().aboutToQuit.connect(self.cleanup)
+
+    def init_stt(self):
+        init_stt_worker = Worker(STT)
+        init_stt_worker.signals.error.connect(self.handle_error)
+        self.threadpool.start(init_stt_worker)
 
     def cleanup(self):
         print('cleanup')
@@ -140,9 +151,11 @@ class MainWindow(QMainWindow):
     def handle_finished(self):
         print("Done.")
 
-    def send_message(self):
+    def send_message(self, user_input: str = None):
+        if not user_input:
+            user_input = self.input.text()
         worker = Worker(
-            self.model.query, self.input.text()
+            self.model.query, user_input
         )
         worker.signals.error.connect(self.handle_error)
         worker.signals.result.connect(self.handle_response)
@@ -150,10 +163,19 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
 
     def speak_response(self, text: str):
-        worker = Worker(
-            self.tts.speak, text
-        )
+        worker = Worker(self.tts.speak, text)
         worker.signals.error.connect(self.handle_error)
+        worker.signals.finished.connect(self.handle_finished)
+        self.threadpool.start(worker)
+
+    def handle_record_response(self, s):
+        self.label_response.setText(s)
+        self.send_message(s)
+    
+    def record(self):
+        worker = Worker(self.stt.transcribe, "tmp/test.wav")
+        worker.signals.error.connect(self.handle_error)
+        worker.signals.result.connect(self.handle_record_response)
         worker.signals.finished.connect(self.handle_finished)
         self.threadpool.start(worker)
 
