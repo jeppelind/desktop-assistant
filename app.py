@@ -1,3 +1,5 @@
+from collections import deque
+import speech_recognition
 import tempfile
 from PyQt6.QtCore import QThreadPool, QTimer, QThread
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
@@ -12,9 +14,10 @@ import time
 import soundfile as sf
 import sounddevice as sd
 from faster_whisper import WhisperModel
+import speech_recognition
 
-class STT:
-    def __init__(self, model_size="base"):
+class SpeechToText:
+    def __init__(self, model_size="base.en"):
         """
         Args:
             model_size (str): faster-whisper model.
@@ -22,6 +25,18 @@ class STT:
         print(f"Loading faster-whisper model: {model_size}")
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
         print("Model loaded")
+
+    def record(self):
+        recognizer = speech_recognition.Recognizer()
+        mic = speech_recognition.Microphone()
+        with mic as source:
+            audio = recognizer.listen(source)
+        return recognizer.recognize_faster_whisper(
+            audio,
+            model='base.en',
+            init_options={'device': 'cpu', 'compute_type': 'int8'},
+            language='en'
+        )
     
     def transcribe(self, audio_file_path: str) -> str:
         if not audio_file_path:
@@ -31,7 +46,7 @@ class STT:
         full_text = [segment.text for segment in segments]
         return "".join(full_text).strip()
 
-class TTS:
+class TextToSpeech:
     def __init__(self):
         self.voice = PiperVoice.load("assets/voice/en_US-hfc_female-medium.onnx", "assets/voice/en_US-hfc_female-medium.onnx.json")
     
@@ -59,14 +74,14 @@ class TTS:
 
 class ModelInterface:
     def __init__(self):
-        self.messages = []
+        self.messages = deque(maxlen=50)
         self.model = 'llama3.2'
 
     def query(self, input: str) -> str:
         self.messages.append({'role': 'user', 'content': input})
         response = chat(
             model=self.model, 
-            messages=[{'role': 'user', 'content': input}], 
+            messages=[*self.messages, {'role': 'user', 'content': input}], 
         )
         self.messages.append({'role': 'assistant', 'content': response.message.content})
         return response.message.content
@@ -88,7 +103,7 @@ class MainWindow(QMainWindow):
 
         self.counter = 0
         self.model = ModelInterface()
-        self.tts = TTS()
+        self.tts = TextToSpeech()
         self.stt = None
 
         layout = QVBoxLayout()
@@ -126,9 +141,13 @@ class MainWindow(QMainWindow):
         QApplication.instance().aboutToQuit.connect(self.cleanup)
 
     def init_stt(self):
-        init_stt_worker = Worker(STT)
+        init_stt_worker = Worker(SpeechToText)
+        init_stt_worker.signals.result.connect(self.handle_stt_loaded)
         init_stt_worker.signals.error.connect(self.handle_error)
         self.threadpool.start(init_stt_worker)
+
+    def handle_stt_loaded(self, stt_instance):
+        self.stt = stt_instance
 
     def cleanup(self):
         print('cleanup')
@@ -169,11 +188,17 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
 
     def handle_record_response(self, s):
+        print(s)
         self.label_response.setText(s)
         self.send_message(s)
     
     def record(self):
-        worker = Worker(self.stt.transcribe, "tmp/test.wav")
+        # worker = Worker(self.stt.transcribe, "tmp/test.wav")
+        # worker.signals.error.connect(self.handle_error)
+        # worker.signals.result.connect(self.handle_record_response)
+        # worker.signals.finished.connect(self.handle_finished)
+        # self.threadpool.start(worker)
+        worker = Worker(self.stt.record)
         worker.signals.error.connect(self.handle_error)
         worker.signals.result.connect(self.handle_record_response)
         worker.signals.finished.connect(self.handle_finished)
