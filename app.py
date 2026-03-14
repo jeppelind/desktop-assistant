@@ -1,7 +1,6 @@
 from collections import deque
-import speech_recognition
 import tempfile
-from PyQt6.QtCore import QThreadPool, QTimer, QThread
+from PyQt6.QtCore import QThreadPool, QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
@@ -15,6 +14,7 @@ import soundfile as sf
 import sounddevice as sd
 from faster_whisper import WhisperModel
 import speech_recognition
+import numpy as np
 
 class SpeechToText:
     def __init__(self, model_size="base.en"):
@@ -29,19 +29,20 @@ class SpeechToText:
     def record(self):
         recognizer = speech_recognition.Recognizer()
         mic = speech_recognition.Microphone()
-        with mic as source:
-            audio = recognizer.listen(source)
-        return recognizer.recognize_faster_whisper(
-            audio,
-            model='base.en',
-            init_options={'device': 'cpu', 'compute_type': 'int8'},
-            language='en'
-        )
-    
-    def transcribe(self, audio_file_path: str) -> str:
-        if not audio_file_path:
-            return ""
         
+        with mic as source:
+            print("Adjusting for ambient noise...")
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            print("Listening...")
+            audio = recognizer.listen(source)
+            
+        raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
+
+        # Convert the raw bytes to a standard float32 numpy array and normalize to -1.0 to 1.0 range
+        audio_np = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+        return self.transcribe(audio_np)
+    
+    def transcribe(self, audio_file_path: np.ndarray) -> str:
         segments, info = self.model.transcribe(audio_file_path, language="en")
         full_text = [segment.text for segment in segments]
         return "".join(full_text).strip()
@@ -75,15 +76,15 @@ class TextToSpeech:
 class ModelInterface:
     def __init__(self):
         self.messages = deque(maxlen=50)
-        self.model = 'llama3.2'
+        self.model = "llama3.2"
 
     def query(self, input: str) -> str:
-        self.messages.append({'role': 'user', 'content': input})
+        self.messages.append({"role": "user", "content": input})
         response = chat(
             model=self.model, 
-            messages=[*self.messages, {'role': 'user', 'content': input}], 
+            messages=[*self.messages, {"role": "user", "content": input}], 
         )
-        self.messages.append({'role': 'assistant', 'content': response.message.content})
+        self.messages.append({"role": "assistant", "content": response.message.content})
         return response.message.content
 
 class MainWindow(QMainWindow):
@@ -193,11 +194,6 @@ class MainWindow(QMainWindow):
         self.send_message(s)
     
     def record(self):
-        # worker = Worker(self.stt.transcribe, "tmp/test.wav")
-        # worker.signals.error.connect(self.handle_error)
-        # worker.signals.result.connect(self.handle_record_response)
-        # worker.signals.finished.connect(self.handle_finished)
-        # self.threadpool.start(worker)
         worker = Worker(self.stt.record)
         worker.signals.error.connect(self.handle_error)
         worker.signals.result.connect(self.handle_record_response)
