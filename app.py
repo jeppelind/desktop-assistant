@@ -1,126 +1,26 @@
-from collections import deque
-from PyQt6.QtCore import QThreadPool, QTimer, QObject, pyqtSignal
+from PyQt6.QtCore import QThreadPool, QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon
-from ollama import chat
 from worker import Worker
-from piper import PiperVoice
-import tempfile
-import wave
-import os
-import time
-import soundfile as sf
-import sounddevice as sd
-from faster_whisper import WhisperModel
-from speech_recognition import Recognizer, Microphone, AudioData
-import numpy as np
+from text_to_speech import TextToSpeech
+from speech_to_text import SpeechToText
+from llm_interface import LLMInterface
+from enum import Enum
 
-class SpeechSignals(QObject):
-    new_message = pyqtSignal(str)
-
-class SpeechToText:
-    def __init__(self, model_size="base.en"):
-        """
-        Args:
-            model_size (str): faster-whisper model.
-        """
-        print(f"Loading faster-whisper model: {model_size}")
-        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        print("Model loaded")
-        self.signals = SpeechSignals()
-        self._stop_listening_fn = None
-    
-    def transcribe(self, audio_array: np.ndarray) -> str:
-        segments, info = self.model.transcribe(audio_array, language="en")
-        full_text = [segment.text for segment in segments]
-        return "".join(full_text).strip()
-
-    def record(self):
-        recognizer = Recognizer()
-        mic = Microphone()
-        
-        with mic as source:
-            print("Adjusting for ambient noise...")
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            print("Listening...")
-            audio = recognizer.listen(source)
-            
-        raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
-
-        # Convert the raw bytes to a standard float32 numpy array and normalize to -1.0 to 1.0 range
-        audio_np = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
-        return self.transcribe(audio_np)
-    
-    def listen_in_background(self):
-        recognizer = Recognizer()
-        mic = Microphone()
-
-        def handle_audio(_, audio: AudioData):
-            raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
-
-            # Convert the raw bytes to a standard float32 numpy array and normalize to -1.0 to 1.0 range
-            audio_np = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
-            message = self.transcribe(audio_np)
-            if message:
-                self.signals.new_message.emit(message)
-        
-        with mic as source:
-            print("Adjusting for ambient noise...")
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            print("Listening continuously in background...")
-
-        self._stop_listening_fn = recognizer.listen_in_background(mic, handle_audio)
-
-    def stop_listening(self):
-        if self._stop_listening_fn:
-            self._stop_listening_fn(wait_for_stop=False)
-            self._stop_listening_fn = None
-            print("Stopped background listening")
-
-class TextToSpeech:
-    def __init__(self):
-        self.voice = PiperVoice.load("assets/voice/en_US-hfc_female-medium.onnx", "assets/voice/en_US-hfc_female-medium.onnx.json")
-    
-    def speak(self, text: str):
-        with tempfile.NamedTemporaryFile(dir="tmp", suffix=".wav", delete=False) as temp_audio:
-            audio_file_path = temp_audio.name
-        
-        try:
-            with wave.open(audio_file_path, "wb") as wav_file:
-                self.voice.synthesize_wav(text, wav_file)
-
-            data, fs = sf.read(audio_file_path)
-            sd.play(data, fs)
-            
-            while sd.get_stream() is not None and sd.get_stream().active:
-                time.sleep(0.1)
-        finally:
-            try:
-                os.remove(audio_file_path)
-            except OSError:
-                pass
-
-    def stop(self):
-        sd.stop()
-
-class ModelInterface:
-    def __init__(self):
-        self.messages = deque(maxlen=50)
-        self.model = "llama3.2"
-
-    def query(self, input: str) -> str:
-        self.messages.append({"role": "user", "content": input})
-        response = chat(
-            model=self.model, 
-            messages=[*self.messages, {"role": "user", "content": input}], 
-        )
-        self.messages.append({"role": "assistant", "content": response.message.content})
-        return response.message.content
+class AppState(Enum):
+    INACTIVE = 1
+    IDLE = 2
+    LISTENING = 3
+    WORKING = 4
+    RESPONDING = 5
 
 class MainWindow(QMainWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self._state = AppState.INACTIVE
+
         # self.setWindowFlags(Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -134,13 +34,14 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
 
         self.counter = 0
-        self.model = ModelInterface()
+        self.llm = LLMInterface()
         self.tts = TextToSpeech()
         self.stt = None
 
         layout = QVBoxLayout()
 
         self.progress = QProgressBar()
+        self.label_state = QLabel(self._state.name)
         self.input = QLineEdit()
         button = QPushButton("Send")
         button.pressed.connect(self.send_message)
@@ -153,6 +54,7 @@ class MainWindow(QMainWindow):
         button4.pressed.connect(self.stop_listening)
 
         layout.addWidget(self.progress)
+        layout.addWidget(self.label_state)
         layout.addWidget(self.input)
         layout.addWidget(button)
         layout.addWidget(button2)
@@ -189,6 +91,13 @@ class MainWindow(QMainWindow):
         print('cleanup')
         self.tts.stop()
         self.threadpool.waitForDone()
+    
+    def state(self) -> AppState:
+        return self._state
+    
+    def set_state(self, state: AppState):
+        self._state = state
+        self.label_state.setText(state.name)
 
     def recurring_timer(self):
         self.counter += 1
@@ -207,21 +116,26 @@ class MainWindow(QMainWindow):
         print("Done.")
 
     def send_message(self, user_input: str = None):
-        worker = Worker(self.model.query, user_input)
+        self.set_state(AppState.WORKING)
+        worker = Worker(self.llm.query, user_input)
         worker.signals.error.connect(self.handle_error)
         worker.signals.result.connect(self.handle_llm_response)
         worker.signals.finished.connect(self.handle_finished)
         self.threadpool.start(worker)
 
     def speak_response(self, text: str):
+        self.set_state(AppState.RESPONDING)
         worker = Worker(self.tts.speak, text)
         worker.signals.error.connect(self.handle_error)
-        worker.signals.finished.connect(self.handle_finished)
+        worker.signals.finished.connect(lambda: self.set_state(AppState.LISTENING))
         self.threadpool.start(worker)
 
     def handle_record_response(self, s):
-        self.label_response.setText(s)
-        self.send_message(s)
+        if s.lower() == "stop.":
+            self.tts.stop()
+        else:
+            self.label_response.setText(s)
+            self.send_message(s)
     
     def record(self):
         worker = Worker(self.stt.record)
@@ -231,6 +145,7 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
 
     def listen_in_background(self):
+        self.set_state(AppState.IDLE)
         worker = Worker(self.stt.listen_in_background)
         worker.signals.error.connect(self.handle_error)
         worker.signals.finished.connect(self.handle_finished)
@@ -239,7 +154,7 @@ class MainWindow(QMainWindow):
     def stop_listening(self):
         worker = Worker(self.stt.stop_listening)
         worker.signals.error.connect(self.handle_error)
-        worker.signals.finished.connect(self.handle_finished)
+        worker.signals.finished.connect(lambda: self.set_state(AppState.INACTIVE))
         self.threadpool.start(worker)
 
 app = QApplication([])
