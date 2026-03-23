@@ -1,3 +1,4 @@
+import re
 from PyQt6.QtCore import QObject, pyqtSignal
 from faster_whisper import WhisperModel
 from speech_recognition import Recognizer, Microphone, AudioData
@@ -7,19 +8,22 @@ class SpeechSignals(QObject):
     new_message = pyqtSignal(str)
 
 class SpeechToText:
-    def __init__(self, model_size="base.en"):
+    def __init__(self, model_size="base"):
         """
         Args:
             model_size (str): faster-whisper model.
         """
         print(f"Loading faster-whisper model: {model_size}")
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        # self.model = WhisperModel(model_size, device="cuda", compute_type="float16")
         print("Model loaded")
         self.signals = SpeechSignals()
         self._stop_listening_fn = None
+        self._use_wake_word = False
     
     def transcribe(self, audio_array: np.ndarray) -> str:
         segments, info = self.model.transcribe(audio_array, language="en")
+        print(f"Detected language: {info.language} with probability {info.language_probability}")
         full_text = [segment.text for segment in segments]
         return "".join(full_text).strip()
 
@@ -49,12 +53,16 @@ class SpeechToText:
             # Convert the raw bytes to a standard float32 numpy array and normalize to -1.0 to 1.0 range
             audio_np = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
             message = self.transcribe(audio_np)
+
             if message:
-                self.signals.new_message.emit(message)
+                if self._use_wake_word:
+                    self.handle_wake_word(message)
+                else:
+                    self.send_message(message)
         
         with mic as source:
             print("Adjusting for ambient noise...")
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            recognizer.adjust_for_ambient_noise(source, duration=1)
             print("Listening continuously in background...")
 
         self._stop_listening_fn = recognizer.listen_in_background(mic, handle_audio)
@@ -64,3 +72,24 @@ class SpeechToText:
             self._stop_listening_fn(wait_for_stop=False)
             self._stop_listening_fn = None
             print("Stopped background listening")
+    
+    def send_message(self, message: str):
+        self.signals.new_message.emit(message)
+        
+    def toggle_wake_word(self, use_wake_word: bool):
+        print(f"Toggle wake word: {use_wake_word}")
+        self._use_wake_word = use_wake_word
+
+    def handle_wake_word(self, message: str):
+        wake_word = "toast"
+        print(f"Message: {message}")
+        clean_message = re.sub(r'[^\w\s]', '', message).lower().strip()
+        print(f"Clean message: {clean_message}")
+        if clean_message.startswith(wake_word):
+            # message_without_wake_word = message[len(wake_word):].strip()
+            pattern = re.compile(re.escape(wake_word), re.IGNORECASE)
+            message_without_wake_word = pattern.sub('', message, count=1).lstrip(' ,.!?')
+            if message_without_wake_word.strip():
+                print(f"Message without wake word: {message_without_wake_word}")
+                self.send_message(message_without_wake_word)
+    

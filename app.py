@@ -1,3 +1,4 @@
+import argparse
 from PyQt6.QtCore import QThreadPool, QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QWidget, QLineEdit, QProgressBar, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import Qt
@@ -17,10 +18,15 @@ class AppState(Enum):
 
 class MainWindow(QMainWindow):
     def __init__(self, *args, **kwargs):
+        whisper_model = kwargs.pop('whisper_model')
+
         super().__init__(*args, **kwargs)
 
         self._state = AppState.INACTIVE
-
+        self.timer_listening = QTimer()
+        self.timer_listening.timeout.connect(lambda: self.set_state(AppState.IDLE))
+        self.timer_listening.setSingleShot(True)
+        
         # self.setWindowFlags(Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -44,7 +50,7 @@ class MainWindow(QMainWindow):
         self.label_state = QLabel(self._state.name)
         self.input = QLineEdit()
         button = QPushButton("Send")
-        button.pressed.connect(self.send_message)
+        button.pressed.connect(lambda: self.send_message(self.input.text()))
         button2 = QPushButton("Listen")
         button2.pressed.connect(self.listen_in_background)
         button3 = QPushButton("Record")
@@ -73,12 +79,12 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.recurring_timer)
         self.timer.start()
         
-        self.init_stt()
+        self.init_stt(whisper_model)
 
         QApplication.instance().aboutToQuit.connect(self.cleanup)
 
-    def init_stt(self):
-        init_stt_worker = Worker(SpeechToText)
+    def init_stt(self, whisper_model: str):
+        init_stt_worker = Worker(SpeechToText, whisper_model)
         init_stt_worker.signals.result.connect(self.handle_stt_loaded)
         init_stt_worker.signals.error.connect(self.handle_error)
         self.threadpool.start(init_stt_worker)
@@ -96,6 +102,13 @@ class MainWindow(QMainWindow):
         return self._state
     
     def set_state(self, state: AppState):
+        if state == AppState.LISTENING:
+            self.stt.toggle_wake_word(False)
+            self.timer_listening.start(5000) # Listen for user response for 5 seconds before going IDLE
+        elif state == AppState.IDLE:
+            self.stt.toggle_wake_word(True)
+        elif state == AppState.RESPONDING:
+            self.stt.toggle_wake_word(False)
         self._state = state
         self.label_state.setText(state.name)
 
@@ -116,7 +129,9 @@ class MainWindow(QMainWindow):
         print("Done.")
 
     def send_message(self, user_input: str = None):
+        print(f"Sending message: {user_input}")
         self.set_state(AppState.WORKING)
+        self.timer_listening.stop()
         worker = Worker(self.llm.query, user_input)
         worker.signals.error.connect(self.handle_error)
         worker.signals.result.connect(self.handle_llm_response)
@@ -131,7 +146,11 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
 
     def handle_record_response(self, s):
-        if s.lower() == "stop.":
+        print(s)
+        self.set_state(AppState.LISTENING)
+        if not s:
+            return
+        elif s.lower() == "stop.":
             self.tts.stop()
         else:
             self.label_response.setText(s)
@@ -148,7 +167,6 @@ class MainWindow(QMainWindow):
         self.set_state(AppState.IDLE)
         worker = Worker(self.stt.listen_in_background)
         worker.signals.error.connect(self.handle_error)
-        worker.signals.finished.connect(self.handle_finished)
         self.threadpool.start(worker)
 
     def stop_listening(self):
@@ -157,7 +175,11 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self.set_state(AppState.INACTIVE))
         self.threadpool.start(worker)
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--whisper_model', default='base', help='Whisper model to use')
+args = parser.parse_args()
+
 app = QApplication([])
-window = MainWindow()
+window = MainWindow(whisper_model=args.whisper_model)
 window.show()
 app.exec()
