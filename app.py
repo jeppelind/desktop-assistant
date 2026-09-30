@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
 
     def handle_error(self, data):
         print(data)
+        self.set_state(AppState.LISTENING)
 
     def handle_finished(self):
         print("Done.")
